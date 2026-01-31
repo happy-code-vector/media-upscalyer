@@ -91,3 +91,9 @@ This project is built upon the excellent work of the following open-source proje
 
 - **Real-ESRGAN:** [https://github.com/xinntao/Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN)
 - **BasicSR:** [https://github.com/xinntao/BasicSR](https://github.com/xinntao/BasicSR)
+
+
+Patched the basicsr package at env\Lib\site-packages\basicsr\data\degradations.py:8 to use the new torchvision import path:
+
+Old: from torchvision.transforms.functional_tensor import rgb_to_grayscale
+New: from torchvision.transforms.functional import rgb_to_grayscale
