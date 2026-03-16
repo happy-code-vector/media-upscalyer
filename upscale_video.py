@@ -1,0 +1,279 @@
+#!/usr/bin/env python3
+"""
+4K Video Upscaler using Real-ESRGAN
+Standalone script for cloud GPU environments
+
+Based on: https://github.com/yuvraj108c/4k-video-upscaler-colab
+Original Real-ESRGAN: https://github.com/xinntao/Real-ESRGAN
+"""
+
+import argparse
+import cv2
+import os
+import subprocess
+import sys
+import shutil
+from pathlib import Path
+
+import torch
+
+
+def check_gpu():
+    """Check if CUDA GPU is available."""
+    if not torch.cuda.is_available():
+        print("ERROR: GPU not detected. This script requires a CUDA-capable GPU.")
+        sys.exit(1)
+    print(f"GPU detected: {torch.cuda.get_device_name(0)}")
+    return True
+
+
+def setup_environment(install_deps=False):
+    """Setup the environment and install dependencies if needed."""
+    if install_deps:
+        print("Installing dependencies...")
+        subprocess.run([sys.executable, "-m", "pip", "install", "-q",
+            "torch==2.0.1", "torchvision==0.15.2",
+            "--extra-index-url", "https://download.pytorch.org/whl/cu118"], check=True)
+        subprocess.run([sys.executable, "-m", "pip", "install", "-q",
+            "basicsr", "facexlib", "gfpgan", "ffmpeg-python"], check=True)
+        subprocess.run([sys.executable, "-m", "pip", "install", "-q", "numpy<2"], check=True)
+
+    realesrgan_dir = Path("Real-ESRGAN")
+    if not realesrgan_dir.exists():
+        print("Cloning Real-ESRGAN repository...")
+        subprocess.run(["git", "clone", "https://github.com/xinntao/Real-ESRGAN.git"], check=True)
+        os.chdir("Real-ESRGAN")
+        subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-r", "requirements.txt"], check=True)
+        subprocess.run([sys.executable, "setup.py", "develop"], check=True)
+        os.chdir("..")
+
+    realesrgan_path = str(Path("Real-ESRGAN").resolve())
+    if realesrgan_path not in sys.path:
+        sys.path.insert(0, realesrgan_path)
+
+    return realesrgan_dir
+
+
+def get_resolution_params(resolution: str, video_width: int, video_height: int):
+    """Calculate output resolution and scale factor."""
+    aspect_ratio = video_width / video_height
+
+    resolution_map = {
+        "FHD": (1920, 1080), "2k": (2560, 1440), "4k": (3840, 2160),
+        "2x": (2 * video_width, 2 * video_height),
+        "3x": (3 * video_width, 3 * video_height),
+        "4x": (4 * video_width, 4 * video_height),
+    }
+
+    final_width, final_height = resolution_map.get(resolution, (2 * video_width, 2 * video_height))
+
+    if aspect_ratio == 1.0 and "x" not in resolution:
+        final_height = final_width
+    if aspect_ratio < 1.0 and "x" not in resolution:
+        final_width, final_height = final_height, final_width
+
+    scale_factor = max(final_width / video_width, final_height / video_height)
+
+    # Ensure even dimensions
+    while int(video_width * scale_factor) % 2 != 0 or int(video_height * scale_factor) % 2 != 0:
+        scale_factor += 0.01
+
+    return final_width, final_height, scale_factor
+
+
+def extract_frames(video_path: str, frames_dir: str):
+    """Extract frames from video using ffmpeg."""
+    os.makedirs(frames_dir, exist_ok=True)
+    print(f"Extracting frames from {video_path}...")
+    cmd = ["ffmpeg", "-y", "-i", video_path, "-qscale:v", "1", "-qmin", "1", "-qmax", "1",
+           "-vsync", "0", os.path.join(frames_dir, "frame_%08d.png")]
+    subprocess.run(cmd, check=True, capture_output=True)
+    print(f"Frames extracted to {frames_dir}")
+
+
+def get_video_info(video_path: str):
+    """Get video dimensions and fps."""
+    cap = cv2.VideoCapture(video_path)
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    cap.release()
+    return width, height, fps, frame_count
+
+
+def upscale_frames(frames_dir: str, output_dir: str, model: str, scale_factor: float, tile_size: int = 0):
+    """Upscale frames using Real-ESRGAN."""
+    from basicsr.archs.rrdbnet_arch import RRDBNet
+    from basicsr.utils.download_util import load_file_from_url
+    from realesrgan import RealESRGANer
+    from realesrgan.archs.srvgg_arch import SRVGGNetCompact
+    from tqdm import tqdm
+
+    model_configs = {
+        "RealESRGAN_x4plus": {
+            "model_class": RRDBNet,
+            "model_args": {"num_in_ch": 3, "num_out_ch": 3, "num_feat": 64, "num_block": 23, "num_grow_ch": 32, "scale": 4},
+            "netscale": 4,
+            "url": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth"
+        },
+        "RealESRGAN_x4plus_anime_6B": {
+            "model_class": RRDBNet,
+            "model_args": {"num_in_ch": 3, "num_out_ch": 3, "num_feat": 64, "num_block": 6, "num_grow_ch": 32, "scale": 4},
+            "netscale": 4,
+            "url": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/RealESRGAN_x4plus_anime_6B.pth"
+        },
+        "realesr-animevideov3": {
+            "model_class": SRVGGNetCompact,
+            "model_args": {"num_in_ch": 3, "num_out_ch": 3, "num_feat": 64, "num_conv": 16, "upscale": 4, "act_type": "prelu"},
+            "netscale": 4,
+            "url": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-animevideov3.pth"
+        }
+    }
+
+    config = model_configs.get(model, model_configs["RealESRGAN_x4plus"])
+
+    model_dir = Path("models")
+    model_dir.mkdir(exist_ok=True)
+    model_path = model_dir / f"{model}.pth"
+
+    if not model_path.exists():
+        print(f"Downloading model {model}...")
+        model_path = load_file_from_url(url=config["url"], model_dir=str(model_dir), progress=True, file_name=f"{model}.pth")
+
+    model_instance = config["model_class"](**config["model_args"])
+    upsampler = RealESRGANer(scale=config["netscale"], model_path=str(model_path), model=model_instance,
+                              tile=tile_size, tile_pad=10, pre_pad=0, half=True)
+
+    frame_files = sorted([f for f in os.listdir(frames_dir) if f.endswith(('.png', '.jpg', '.jpeg'))])
+    os.makedirs(output_dir, exist_ok=True)
+    print(f"Upscaling {len(frame_files)} frames with scale factor {scale_factor}...")
+
+    for frame_file in tqdm(frame_files, desc="Upscaling"):
+        img = cv2.imread(os.path.join(frames_dir, frame_file), cv2.IMREAD_UNCHANGED)
+        output, _ = upsampler.enhance(img, outscale=scale_factor)
+        cv2.imwrite(os.path.join(output_dir, frame_file), output)
+
+    print(f"Upscaled frames saved to {output_dir}")
+
+
+def create_video(frames_dir: str, output_path: str, fps: float, use_nvenc: bool = True):
+    """Create video from frames using ffmpeg."""
+    print("Creating video from frames...")
+    if use_nvenc and shutil.which("nvidia-smi"):
+        cmd = ["ffmpeg", "-y", "-framerate", str(fps), "-i", os.path.join(frames_dir, "frame_%08d.png"),
+               "-c:v", "h264_nvenc", "-preset", "p4", "-rc:v", "vbr_hq", "-cq:v", "19", "-b:v", "0", "-pix_fmt", "yuv420p", output_path]
+    else:
+        cmd = ["ffmpeg", "-y", "-framerate", str(fps), "-i", os.path.join(frames_dir, "frame_%08d.png"),
+               "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p", output_path]
+    subprocess.run(cmd, check=True, capture_output=True)
+    print(f"Video created: {output_path}")
+
+
+def crop_video(input_path: str, output_path: str, width: int, height: int, use_nvenc: bool = True):
+    """Crop video to exact target resolution."""
+    print(f"Cropping video to {width}x{height}...")
+    if use_nvenc and shutil.which("nvidia-smi"):
+        cmd = ["ffmpeg", "-y", "-hwaccel", "cuda", "-i", input_path,
+               "-vf", f"crop={width}:{height}:(in_w-{width})/2:(in_h-{height})/2",
+               "-c:v", "h264_nvenc", "-preset", "p4", "-pix_fmt", "yuv420p", output_path]
+    else:
+        cmd = ["ffmpeg", "-y", "-i", input_path,
+               "-vf", f"crop={width}:{height}:(in_w-{width})/2:(in_h-{height})/2",
+               "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p", output_path]
+    subprocess.run(cmd, check=True, capture_output=True)
+
+
+def add_audio(original_video: str, upscaled_video: str, output_video: str):
+    """Add audio from original video to upscaled video."""
+    print("Adding audio track...")
+    cmd = ["ffmpeg", "-y", "-i", upscaled_video, "-i", original_video,
+           "-map", "0:v", "-map", "1:a?", "-c:v", "copy", "-c:a", "aac", "-shortest", output_video]
+    result = subprocess.run(cmd, capture_output=True)
+    if result.returncode == 0:
+        print(f"Final video with audio: {output_video}")
+        return True
+    shutil.copy(upscaled_video, output_video)
+    print(f"No audio found. Video saved: {output_video}")
+    return False
+
+
+def upscale_video(video_path: str, output_dir: str, resolution: str = "4k", model: str = "RealESRGAN_x4plus",
+                  tile_size: int = 0, keep_frames: bool = False, skip_setup: bool = False):
+    """Main video upscaling function."""
+    if not os.path.exists(video_path):
+        raise FileNotFoundError(f"Video file not found: {video_path}")
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    if not skip_setup:
+        setup_environment(install_deps=False)
+
+    video_width, video_height, fps, frame_count = get_video_info(video_path)
+    print(f"Input: {video_width}x{video_height} @ {fps:.2f} fps, {frame_count} frames")
+
+    final_width, final_height, scale_factor = get_resolution_params(resolution, video_width, video_height)
+    print(f"Output: {final_width}x{final_height} (scale: {scale_factor:.2f})")
+
+    video_name = Path(video_path).stem
+    temp_frames = os.path.join(output_dir, f"{video_name}_frames")
+    temp_upscaled = os.path.join(output_dir, f"{video_name}_upscaled_frames")
+    temp_video = os.path.join(output_dir, f"{video_name}_temp.mp4")
+    final_video = os.path.join(output_dir, f"{video_name}_{final_width}x{final_height}.mp4")
+
+    try:
+        extract_frames(video_path, temp_frames)
+        upscale_frames(temp_frames, temp_upscaled, model, scale_factor, tile_size)
+        create_video(temp_upscaled, temp_video, fps)
+
+        if "x" not in resolution:
+            crop_video(temp_video, final_video, final_width, final_height)
+            os.remove(temp_video)
+        else:
+            shutil.move(temp_video, final_video)
+
+        final_with_audio = os.path.join(output_dir, f"{video_name}_{final_width}x{final_height}_audio.mp4")
+        add_audio(video_path, final_video, final_with_audio)
+        if os.path.exists(final_with_audio):
+            os.remove(final_video)
+            shutil.move(final_with_audio, final_video)
+
+        print(f"\n{'='*50}\nSUCCESS! Output: {final_video}\n{'='*50}")
+    finally:
+        if not keep_frames:
+            print("Cleaning up temporary files...")
+            for d in [temp_frames, temp_upscaled]:
+                if os.path.exists(d):
+                    shutil.rmtree(d)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="4K Video Upscaler using Real-ESRGAN")
+    parser.add_argument("-i", "--input", type=str, help="Input video file")
+    parser.add_argument("-o", "--output", type=str, default="output", help="Output directory")
+    parser.add_argument("-r", "--resolution", type=str, default="4k", choices=["FHD", "2k", "4k", "2x", "3x", "4x"])
+    parser.add_argument("-m", "--model", type=str, default="RealESRGAN_x4plus",
+                        choices=["RealESRGAN_x4plus", "RealESRGAN_x4plus_anime_6B", "realesr-animevideov3"])
+    parser.add_argument("-t", "--tile", type=int, default=0, help="Tile size (0=auto, 512 for low VRAM)")
+    parser.add_argument("--keep-frames", action="store_true", help="Keep temporary frames")
+    parser.add_argument("--install-deps", action="store_true", help="Install dependencies")
+    parser.add_argument("--skip-setup", action="store_true", help="Skip environment setup")
+
+    args = parser.parse_args()
+
+    if args.install_deps:
+        setup_environment(install_deps=True)
+        print("Dependencies installed!")
+        return
+
+    if not args.input:
+        parser.print_help()
+        print("\nError: --input is required")
+        sys.exit(1)
+
+    check_gpu()
+    upscale_video(args.input, args.output, args.resolution, args.model, args.tile, args.keep_frames, args.skip_setup)
+
+
+if __name__ == "__main__":
+    main()
