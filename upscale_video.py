@@ -91,11 +91,39 @@ def get_resolution_params(resolution: str, video_width: int, video_height: int):
     return final_width, final_height, scale_factor
 
 
+def get_ffmpeg_path():
+    """Get ffmpeg executable path."""
+    # First check if ffmpeg is in PATH
+    ffmpeg_path = shutil.which("ffmpeg")
+    if ffmpeg_path:
+        return ffmpeg_path
+
+    # Try imageio-ffmpeg
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except ImportError:
+        pass
+
+    print("ERROR: ffmpeg not found.")
+    print("\nInstall ffmpeg:")
+    print("  pip install imageio-ffmpeg")
+    print("  Or download from: https://www.gyan.dev/ffmpeg/builds/")
+    sys.exit(1)
+
+
+FFMPEG_PATH = None
+
+
 def extract_frames(video_path: str, frames_dir: str):
     """Extract frames from video using ffmpeg."""
+    global FFMPEG_PATH
+    if FFMPEG_PATH is None:
+        FFMPEG_PATH = get_ffmpeg_path()
+
     os.makedirs(frames_dir, exist_ok=True)
     print(f"Extracting frames from {video_path}...")
-    cmd = ["ffmpeg", "-y", "-i", video_path, "-qscale:v", "1", "-qmin", "1", "-qmax", "1",
+    cmd = [FFMPEG_PATH, "-y", "-i", video_path, "-qscale:v", "1", "-qmin", "1", "-qmax", "1",
            "-vsync", "0", os.path.join(frames_dir, "frame_%08d.png")]
     subprocess.run(cmd, check=True, capture_output=True)
     print(f"Frames extracted to {frames_dir}")
@@ -171,12 +199,16 @@ def upscale_frames(frames_dir: str, output_dir: str, model: str, scale_factor: f
 
 def create_video(frames_dir: str, output_path: str, fps: float, use_nvenc: bool = True):
     """Create video from frames using ffmpeg."""
+    global FFMPEG_PATH
+    if FFMPEG_PATH is None:
+        FFMPEG_PATH = get_ffmpeg_path()
+
     print("Creating video from frames...")
     if use_nvenc and shutil.which("nvidia-smi"):
-        cmd = ["ffmpeg", "-y", "-framerate", str(fps), "-i", os.path.join(frames_dir, "frame_%08d.png"),
+        cmd = [FFMPEG_PATH, "-y", "-framerate", str(fps), "-i", os.path.join(frames_dir, "frame_%08d.png"),
                "-c:v", "h264_nvenc", "-preset", "p4", "-rc:v", "vbr_hq", "-cq:v", "19", "-b:v", "0", "-pix_fmt", "yuv420p", output_path]
     else:
-        cmd = ["ffmpeg", "-y", "-framerate", str(fps), "-i", os.path.join(frames_dir, "frame_%08d.png"),
+        cmd = [FFMPEG_PATH, "-y", "-framerate", str(fps), "-i", os.path.join(frames_dir, "frame_%08d.png"),
                "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p", output_path]
     subprocess.run(cmd, check=True, capture_output=True)
     print(f"Video created: {output_path}")
@@ -184,13 +216,17 @@ def create_video(frames_dir: str, output_path: str, fps: float, use_nvenc: bool 
 
 def crop_video(input_path: str, output_path: str, width: int, height: int, use_nvenc: bool = True):
     """Crop video to exact target resolution."""
+    global FFMPEG_PATH
+    if FFMPEG_PATH is None:
+        FFMPEG_PATH = get_ffmpeg_path()
+
     print(f"Cropping video to {width}x{height}...")
     if use_nvenc and shutil.which("nvidia-smi"):
-        cmd = ["ffmpeg", "-y", "-hwaccel", "cuda", "-i", input_path,
+        cmd = [FFMPEG_PATH, "-y", "-hwaccel", "cuda", "-i", input_path,
                "-vf", f"crop={width}:{height}:(in_w-{width})/2:(in_h-{height})/2",
                "-c:v", "h264_nvenc", "-preset", "p4", "-pix_fmt", "yuv420p", output_path]
     else:
-        cmd = ["ffmpeg", "-y", "-i", input_path,
+        cmd = [FFMPEG_PATH, "-y", "-i", input_path,
                "-vf", f"crop={width}:{height}:(in_w-{width})/2:(in_h-{height})/2",
                "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p", output_path]
     subprocess.run(cmd, check=True, capture_output=True)
@@ -198,8 +234,12 @@ def crop_video(input_path: str, output_path: str, width: int, height: int, use_n
 
 def add_audio(original_video: str, upscaled_video: str, output_video: str):
     """Add audio from original video to upscaled video."""
+    global FFMPEG_PATH
+    if FFMPEG_PATH is None:
+        FFMPEG_PATH = get_ffmpeg_path()
+
     print("Adding audio track...")
-    cmd = ["ffmpeg", "-y", "-i", upscaled_video, "-i", original_video,
+    cmd = [FFMPEG_PATH, "-y", "-i", upscaled_video, "-i", original_video,
            "-map", "0:v", "-map", "1:a?", "-c:v", "copy", "-c:a", "aac", "-shortest", output_video]
     result = subprocess.run(cmd, capture_output=True)
     if result.returncode == 0 and os.path.exists(output_video):
