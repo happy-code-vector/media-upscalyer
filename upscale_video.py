@@ -15,16 +15,22 @@ import sys
 import shutil
 from pathlib import Path
 
-import torch
+# Get script directory for relative paths
+SCRIPT_DIR = Path(__file__).parent.resolve()
 
 
 def check_gpu():
     """Check if CUDA GPU is available."""
-    if not torch.cuda.is_available():
-        print("ERROR: GPU not detected. This script requires a CUDA-capable GPU.")
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            print("ERROR: GPU not detected. This script requires a CUDA-capable GPU.")
+            sys.exit(1)
+        print(f"GPU detected: {torch.cuda.get_device_name(0)}")
+        return True
+    except ImportError:
+        print("ERROR: PyTorch not installed. Run with --install-deps first.")
         sys.exit(1)
-    print(f"GPU detected: {torch.cuda.get_device_name(0)}")
-    return True
 
 
 def setup_environment(install_deps=False):
@@ -32,22 +38,26 @@ def setup_environment(install_deps=False):
     if install_deps:
         print("Installing dependencies...")
         subprocess.run([sys.executable, "-m", "pip", "install", "-q",
-            "torch==2.0.1", "torchvision==0.15.2",
-            "--extra-index-url", "https://download.pytorch.org/whl/cu118"], check=True)
+            "torch", "torchvision",
+            "--extra-index-url", "https://download.pytorch.org/whl/cu121"], check=True)
         subprocess.run([sys.executable, "-m", "pip", "install", "-q",
-            "basicsr", "facexlib", "gfpgan", "ffmpeg-python"], check=True)
+            "basicsr", "facexlib", "gfpgan", "ffmpeg-python", "tqdm"], check=True)
         subprocess.run([sys.executable, "-m", "pip", "install", "-q", "numpy<2"], check=True)
 
-    realesrgan_dir = Path("Real-ESRGAN")
+    realesrgan_dir = SCRIPT_DIR / "Real-ESRGAN"
     if not realesrgan_dir.exists():
         print("Cloning Real-ESRGAN repository...")
-        subprocess.run(["git", "clone", "https://github.com/xinntao/Real-ESRGAN.git"], check=True)
-        os.chdir("Real-ESRGAN")
-        subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-r", "requirements.txt"], check=True)
-        subprocess.run([sys.executable, "setup.py", "develop"], check=True)
-        os.chdir("..")
+        subprocess.run(["git", "clone", "https://github.com/xinntao/Real-ESRGAN.git", str(realesrgan_dir)], check=True)
+        subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-r", str(realesrgan_dir / "requirements.txt")], check=True)
+        # setup.py must be run from inside Real-ESRGAN directory
+        original_cwd = os.getcwd()
+        os.chdir(str(realesrgan_dir))
+        try:
+            subprocess.run([sys.executable, "setup.py", "develop"], check=True)
+        finally:
+            os.chdir(original_cwd)
 
-    realesrgan_path = str(Path("Real-ESRGAN").resolve())
+    realesrgan_path = str(realesrgan_dir.resolve())
     if realesrgan_path not in sys.path:
         sys.path.insert(0, realesrgan_path)
 
@@ -102,7 +112,7 @@ def get_video_info(video_path: str):
     return width, height, fps, frame_count
 
 
-def upscale_frames(frames_dir: str, output_dir: str, model: str, scale_factor: float, tile_size: int = 0):
+def upscale_frames(frames_dir: str, output_dir: str, model: str, scale_factor: float, tile_size: int = 0, use_cpu: bool = False):
     """Upscale frames using Real-ESRGAN."""
     from basicsr.archs.rrdbnet_arch import RRDBNet
     from basicsr.utils.download_util import load_file_from_url
@@ -133,7 +143,7 @@ def upscale_frames(frames_dir: str, output_dir: str, model: str, scale_factor: f
 
     config = model_configs.get(model, model_configs["RealESRGAN_x4plus"])
 
-    model_dir = Path("models")
+    model_dir = SCRIPT_DIR / "models"
     model_dir.mkdir(exist_ok=True)
     model_path = model_dir / f"{model}.pth"
 
@@ -142,8 +152,10 @@ def upscale_frames(frames_dir: str, output_dir: str, model: str, scale_factor: f
         model_path = load_file_from_url(url=config["url"], model_dir=str(model_dir), progress=True, file_name=f"{model}.pth")
 
     model_instance = config["model_class"](**config["model_args"])
+    # Use FP16 half precision only when GPU is available
+    use_half = not use_cpu
     upsampler = RealESRGANer(scale=config["netscale"], model_path=str(model_path), model=model_instance,
-                              tile=tile_size, tile_pad=10, pre_pad=0, half=True)
+                              tile=tile_size, tile_pad=10, pre_pad=0, half=use_half)
 
     frame_files = sorted([f for f in os.listdir(frames_dir) if f.endswith(('.png', '.jpg', '.jpeg'))])
     os.makedirs(output_dir, exist_ok=True)
@@ -190,16 +202,17 @@ def add_audio(original_video: str, upscaled_video: str, output_video: str):
     cmd = ["ffmpeg", "-y", "-i", upscaled_video, "-i", original_video,
            "-map", "0:v", "-map", "1:a?", "-c:v", "copy", "-c:a", "aac", "-shortest", output_video]
     result = subprocess.run(cmd, capture_output=True)
-    if result.returncode == 0:
+    if result.returncode == 0 and os.path.exists(output_video):
         print(f"Final video with audio: {output_video}")
         return True
+    # If no audio or failed, just copy the video
     shutil.copy(upscaled_video, output_video)
     print(f"No audio found. Video saved: {output_video}")
     return False
 
 
 def upscale_video(video_path: str, output_dir: str, resolution: str = "4k", model: str = "RealESRGAN_x4plus",
-                  tile_size: int = 0, keep_frames: bool = False, skip_setup: bool = False):
+                  tile_size: int = 0, keep_frames: bool = False, skip_setup: bool = False, use_cpu: bool = False):
     """Main video upscaling function."""
     if not os.path.exists(video_path):
         raise FileNotFoundError(f"Video file not found: {video_path}")
@@ -223,7 +236,7 @@ def upscale_video(video_path: str, output_dir: str, resolution: str = "4k", mode
 
     try:
         extract_frames(video_path, temp_frames)
-        upscale_frames(temp_frames, temp_upscaled, model, scale_factor, tile_size)
+        upscale_frames(temp_frames, temp_upscaled, model, scale_factor, tile_size, use_cpu)
         create_video(temp_upscaled, temp_video, fps)
 
         if "x" not in resolution:
@@ -232,9 +245,9 @@ def upscale_video(video_path: str, output_dir: str, resolution: str = "4k", mode
         else:
             shutil.move(temp_video, final_video)
 
+        # Add audio from original video
         final_with_audio = os.path.join(output_dir, f"{video_name}_{final_width}x{final_height}_audio.mp4")
-        add_audio(video_path, final_video, final_with_audio)
-        if os.path.exists(final_with_audio):
+        if add_audio(video_path, final_video, final_with_audio):
             os.remove(final_video)
             shutil.move(final_with_audio, final_video)
 
@@ -258,6 +271,7 @@ def main():
     parser.add_argument("--keep-frames", action="store_true", help="Keep temporary frames")
     parser.add_argument("--install-deps", action="store_true", help="Install dependencies")
     parser.add_argument("--skip-setup", action="store_true", help="Skip environment setup")
+    parser.add_argument("--cpu", action="store_true", help="Use CPU instead of GPU (slower)")
 
     args = parser.parse_args()
 
@@ -271,8 +285,10 @@ def main():
         print("\nError: --input is required")
         sys.exit(1)
 
-    check_gpu()
-    upscale_video(args.input, args.output, args.resolution, args.model, args.tile, args.keep_frames, args.skip_setup)
+    if not args.cpu:
+        check_gpu()
+
+    upscale_video(args.input, args.output, args.resolution, args.model, args.tile, args.keep_frames, args.skip_setup, args.cpu)
 
 
 if __name__ == "__main__":
