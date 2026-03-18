@@ -274,7 +274,7 @@ def add_audio(original_video: str, upscaled_video: str, output_video: str):
 
 def upscale_video(video_path: str, output_dir: str, resolution: str = "4k", model: str = "RealESRGAN_x4plus",
                   tile_size: int = 0, keep_frames: bool = False, skip_setup: bool = False, use_cpu: bool = False,
-                  batch_size: int = 1):
+                  batch_size: int = 1, skip_extract: bool = False, frames_dir: str = None):
     """Main video upscaling function."""
     if not os.path.exists(video_path):
         raise FileNotFoundError(f"Video file not found: {video_path}")
@@ -291,13 +291,17 @@ def upscale_video(video_path: str, output_dir: str, resolution: str = "4k", mode
     print(f"Output: {final_width}x{final_height} (scale: {scale_factor:.2f})")
 
     video_name = Path(video_path).stem
-    temp_frames = os.path.join(output_dir, f"{video_name}_frames")
+    temp_frames = frames_dir if frames_dir else os.path.join(output_dir, f"{video_name}_frames")
     temp_upscaled = os.path.join(output_dir, f"{video_name}_upscaled_frames")
     temp_video = os.path.join(output_dir, f"{video_name}_temp.mp4")
     final_video = os.path.join(output_dir, f"{video_name}_{final_width}x{final_height}.mp4")
 
     try:
-        extract_frames(video_path, temp_frames)
+        if not skip_extract:
+            extract_frames(video_path, temp_frames)
+        else:
+            print(f"Skipping frame extraction, using existing frames from: {temp_frames}")
+
         upscale_frames(temp_frames, temp_upscaled, model, scale_factor, tile_size, use_cpu, batch_size)
         create_video(temp_upscaled, temp_video, fps)
 
@@ -315,7 +319,7 @@ def upscale_video(video_path: str, output_dir: str, resolution: str = "4k", mode
 
         print(f"\n{'='*50}\nSUCCESS! Output: {final_video}\n{'='*50}")
     finally:
-        if not keep_frames:
+        if not keep_frames and not frames_dir:
             print("Cleaning up temporary files...")
             for d in [temp_frames, temp_upscaled]:
                 if os.path.exists(d):
@@ -332,6 +336,8 @@ def main():
     parser.add_argument("-t", "--tile", type=int, default=0, help="Tile size (0=auto, 512 for low VRAM)")
     parser.add_argument("-b", "--batch-size", type=int, default=1, help="Batch size for processing (1=sequential)")
     parser.add_argument("--keep-frames", action="store_true", help="Keep temporary frames")
+    parser.add_argument("--skip-extract", action="store_true", help="Skip frame extraction (use existing frames)")
+    parser.add_argument("--frames-dir", type=str, help="Use existing frames from this directory")
     parser.add_argument("--install-deps", action="store_true", help="Install dependencies")
     parser.add_argument("--skip-setup", action="store_true", help="Skip environment setup")
     parser.add_argument("--cpu", action="store_true", help="Use CPU instead of GPU (slower)")
@@ -351,7 +357,8 @@ def main():
     if not args.cpu:
         check_gpu()
 
-    upscale_video(args.input, args.output, args.resolution, args.model, args.tile, args.keep_frames, args.skip_setup, args.cpu, args.batch_size)
+    upscale_video(args.input, args.output, args.resolution, args.model, args.tile, args.keep_frames,
+                  args.skip_setup, args.cpu, args.batch_size, args.skip_extract, args.frames_dir)
 
 
 if __name__ == "__main__":
