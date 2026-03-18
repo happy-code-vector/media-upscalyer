@@ -140,8 +140,9 @@ def get_video_info(video_path: str):
     return width, height, fps, frame_count
 
 
-def upscale_frames(frames_dir: str, output_dir: str, model: str, scale_factor: float, tile_size: int = 0, use_cpu: bool = False):
+def upscale_frames(frames_dir: str, output_dir: str, model: str, scale_factor: float, tile_size: int = 0, use_cpu: bool = False, batch_size: int = 1):
     """Upscale frames using Real-ESRGAN."""
+    import torch
     from basicsr.archs.rrdbnet_arch import RRDBNet
     from basicsr.utils.download_util import load_file_from_url
     from realesrgan import RealESRGANer
@@ -181,18 +182,38 @@ def upscale_frames(frames_dir: str, output_dir: str, model: str, scale_factor: f
 
     model_instance = config["model_class"](**config["model_args"])
     # Use FP16 half precision only when GPU is available
-    use_half = not use_cpu
+    use_half = not use_cpu and torch.cuda.is_available()
     upsampler = RealESRGANer(scale=config["netscale"], model_path=str(model_path), model=model_instance,
                               tile=tile_size, tile_pad=10, pre_pad=0, half=use_half)
 
     frame_files = sorted([f for f in os.listdir(frames_dir) if f.endswith(('.png', '.jpg', '.jpeg'))])
     os.makedirs(output_dir, exist_ok=True)
     print(f"Upscaling {len(frame_files)} frames with scale factor {scale_factor}...")
+    print(f"Using model: {model} | Half precision: {use_half} | Batch size: {batch_size}")
 
-    for frame_file in tqdm(frame_files, desc="Upscaling"):
-        img = cv2.imread(os.path.join(frames_dir, frame_file), cv2.IMREAD_UNCHANGED)
-        output, _ = upsampler.enhance(img, outscale=scale_factor)
-        cv2.imwrite(os.path.join(output_dir, frame_file), output)
+    if batch_size > 1:
+        # Batch processing for better GPU utilization
+        for i in tqdm(range(0, len(frame_files), batch_size), desc="Upscaling batches"):
+            batch_files = frame_files[i:i + batch_size]
+            batch_imgs = []
+            for f in batch_files:
+                img = cv2.imread(os.path.join(frames_dir, f), cv2.IMREAD_UNCHANGED)
+                batch_imgs.append(img)
+
+            # Process batch
+            for f, img in zip(batch_files, batch_imgs):
+                output, _ = upsampler.enhance(img, outscale=scale_factor)
+                cv2.imwrite(os.path.join(output_dir, f), output)
+    else:
+        # Single frame processing
+        for frame_file in tqdm(frame_files, desc="Upscaling"):
+            img = cv2.imread(os.path.join(frames_dir, frame_file), cv2.IMREAD_UNCHANGED)
+            output, _ = upsampler.enhance(img, outscale=scale_factor)
+            cv2.imwrite(os.path.join(output_dir, frame_file), output)
+
+    # Clear GPU memory
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     print(f"Upscaled frames saved to {output_dir}")
 
@@ -252,7 +273,8 @@ def add_audio(original_video: str, upscaled_video: str, output_video: str):
 
 
 def upscale_video(video_path: str, output_dir: str, resolution: str = "4k", model: str = "RealESRGAN_x4plus",
-                  tile_size: int = 0, keep_frames: bool = False, skip_setup: bool = False, use_cpu: bool = False):
+                  tile_size: int = 0, keep_frames: bool = False, skip_setup: bool = False, use_cpu: bool = False,
+                  batch_size: int = 1):
     """Main video upscaling function."""
     if not os.path.exists(video_path):
         raise FileNotFoundError(f"Video file not found: {video_path}")
@@ -276,7 +298,7 @@ def upscale_video(video_path: str, output_dir: str, resolution: str = "4k", mode
 
     try:
         extract_frames(video_path, temp_frames)
-        upscale_frames(temp_frames, temp_upscaled, model, scale_factor, tile_size, use_cpu)
+        upscale_frames(temp_frames, temp_upscaled, model, scale_factor, tile_size, use_cpu, batch_size)
         create_video(temp_upscaled, temp_video, fps)
 
         if "x" not in resolution:
@@ -308,6 +330,7 @@ def main():
     parser.add_argument("-m", "--model", type=str, default="RealESRGAN_x4plus",
                         choices=["RealESRGAN_x4plus", "RealESRGAN_x4plus_anime_6B", "realesr-animevideov3"])
     parser.add_argument("-t", "--tile", type=int, default=0, help="Tile size (0=auto, 512 for low VRAM)")
+    parser.add_argument("-b", "--batch-size", type=int, default=1, help="Batch size for processing (1=sequential)")
     parser.add_argument("--keep-frames", action="store_true", help="Keep temporary frames")
     parser.add_argument("--install-deps", action="store_true", help="Install dependencies")
     parser.add_argument("--skip-setup", action="store_true", help="Skip environment setup")
@@ -328,7 +351,7 @@ def main():
     if not args.cpu:
         check_gpu()
 
-    upscale_video(args.input, args.output, args.resolution, args.model, args.tile, args.keep_frames, args.skip_setup, args.cpu)
+    upscale_video(args.input, args.output, args.resolution, args.model, args.tile, args.keep_frames, args.skip_setup, args.cpu, args.batch_size)
 
 
 if __name__ == "__main__":
