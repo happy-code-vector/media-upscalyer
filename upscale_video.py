@@ -256,14 +256,23 @@ def create_video(frames_dir: str, output_path: str, fps: float, use_nvenc: bool 
         FFMPEG_PATH = get_ffmpeg_path()
 
     print("Creating video from frames...")
+
+    # Try NVENC first if GPU available, fallback to software encoding
     if use_nvenc and shutil.which("nvidia-smi"):
         cmd = [FFMPEG_PATH, "-y", "-framerate", str(fps), "-i", os.path.join(frames_dir, "frame_%08d.png"),
                "-c:v", "h264_nvenc", "-preset", "p4", "-rc:v", "vbr_hq", "-cq:v", "19", "-b:v", "0", "-pix_fmt", "yuv420p", output_path]
-    else:
-        cmd = [FFMPEG_PATH, "-y", "-framerate", str(fps), "-i", os.path.join(frames_dir, "frame_%08d.png"),
-               "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p", output_path]
+        result = subprocess.run(cmd, capture_output=True)
+        if result.returncode == 0:
+            print(f"Video created (NVENC): {output_path}")
+            return
+        else:
+            print("NVENC failed, falling back to software encoding...")
+
+    # Fallback to software encoding
+    cmd = [FFMPEG_PATH, "-y", "-framerate", str(fps), "-i", os.path.join(frames_dir, "frame_%08d.png"),
+           "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p", output_path]
     subprocess.run(cmd, check=True, capture_output=True)
-    print(f"Video created: {output_path}")
+    print(f"Video created (CPU): {output_path}")
 
 
 def crop_video(input_path: str, output_path: str, width: int, height: int, use_nvenc: bool = True):
@@ -273,15 +282,25 @@ def crop_video(input_path: str, output_path: str, width: int, height: int, use_n
         FFMPEG_PATH = get_ffmpeg_path()
 
     print(f"Cropping video to {width}x{height}...")
+
+    # Try NVENC first if GPU available, fallback to software encoding
     if use_nvenc and shutil.which("nvidia-smi"):
         cmd = [FFMPEG_PATH, "-y", "-hwaccel", "cuda", "-i", input_path,
                "-vf", f"crop={width}:{height}:(in_w-{width})/2:(in_h-{height})/2",
                "-c:v", "h264_nvenc", "-preset", "p4", "-pix_fmt", "yuv420p", output_path]
-    else:
-        cmd = [FFMPEG_PATH, "-y", "-i", input_path,
-               "-vf", f"crop={width}:{height}:(in_w-{width})/2:(in_h-{height})/2",
-               "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p", output_path]
+        result = subprocess.run(cmd, capture_output=True)
+        if result.returncode == 0:
+            print(f"Cropped video (NVENC): {output_path}")
+            return
+        else:
+            print("NVENC failed, falling back to software encoding...")
+
+    # Fallback to software encoding
+    cmd = [FFMPEG_PATH, "-y", "-i", input_path,
+           "-vf", f"crop={width}:{height}:(in_w-{width})/2:(in_h-{height})/2",
+           "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p", output_path]
     subprocess.run(cmd, check=True, capture_output=True)
+    print(f"Cropped video (CPU): {output_path}")
 
 
 def add_audio(original_video: str, upscaled_video: str, output_video: str):
