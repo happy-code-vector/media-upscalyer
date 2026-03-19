@@ -258,23 +258,64 @@ def upscale_video_pipe(input_path, output_path, model_name, tile_size=0, scale=4
     encoder = subprocess.Popen(encode_cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
 
     print(f"\nProcessing {frame_count} frames...")
+    print("Using threaded I/O for better performance")
 
-    # Processing loop
+    # Threading for overlapping I/O with GPU processing
+    import threading
+    import queue
+
+    input_queue = queue.Queue(maxsize=8)   # Pre-buffer 8 input frames
+    output_queue = queue.Queue(maxsize=8)  # Pre-buffer 8 output frames
     frame_size = width * height * 3
+    stop_event = threading.Event()
+    reader_error = [None]
+    writer_error = [None]
+
+    def reader_thread():
+        """Read frames from decoder and put in queue."""
+        try:
+            while not stop_event.is_set():
+                raw_frame = decoder.stdout.read(frame_size)
+                if len(raw_frame) != frame_size:
+                    input_queue.put(None)  # Signal end
+                    break
+                frame = np.frombuffer(raw_frame, dtype=np.uint8).reshape((height, width, 3)).copy()
+                input_queue.put(frame)
+        except Exception as e:
+            reader_error[0] = e
+            input_queue.put(None)
+
+    def writer_thread():
+        """Write frames from queue to encoder."""
+        try:
+            while True:
+                item = output_queue.get()
+                if item is None:  # Signal end
+                    break
+                encoder.stdin.write(item)
+                output_queue.task_done()
+        except BrokenPipeError:
+            pass  # Encoder closed
+        except Exception as e:
+            writer_error[0] = e
+
+    # Start threads
+    reader = threading.Thread(target=reader_thread, daemon=True)
+    writer = threading.Thread(target=writer_thread, daemon=True)
+    reader.start()
+    writer.start()
+
+    # Main processing loop
     processed = 0
 
     try:
         with tqdm(total=frame_count, desc="Upscaling", unit="frames") as pbar:
             while True:
-                # Read raw frame from decoder
-                raw_frame = decoder.stdout.read(frame_size)
-                if len(raw_frame) != frame_size:
+                frame = input_queue.get()
+                if frame is None:  # End of input
                     break
 
-                # Convert to numpy array
-                frame = np.frombuffer(raw_frame, dtype=np.uint8).reshape((height, width, 3))
-
-                # Upscale
+                # Upscale on GPU
                 try:
                     output_frame, _ = upsampler.enhance(frame, outscale=scale)
 
@@ -282,34 +323,49 @@ def upscale_video_pipe(input_path, output_path, model_name, tile_size=0, scale=4
                     if output_frame.shape[1] != out_width or output_frame.shape[0] != out_height:
                         output_frame = output_frame[:out_height, :out_width]
 
-                    # Write to encoder
-                    encoder.stdin.write(output_frame.tobytes())
+                    # Queue for writer thread
+                    output_queue.put(output_frame.tobytes())
 
                 except Exception as e:
                     print(f"\nError on frame {processed}: {e}")
                     # Write black frame to keep sync
                     black_frame = np.zeros((out_height, out_width, 3), dtype=np.uint8)
-                    encoder.stdin.write(black_frame.tobytes())
+                    output_queue.put(black_frame.tobytes())
 
                 processed += 1
                 pbar.update(1)
 
     except KeyboardInterrupt:
         print("\n\nInterrupted! Partial video saved.")
-    except BrokenPipeError:
-        print("\n\nERROR: Encoder crashed!")
-        # Get encoder error output
-        encoder_stderr = encoder.stderr.read().decode('utf-8', errors='ignore')
-        if encoder_stderr:
-            print(f"Encoder error:\n{encoder_stderr[-2000:]}")  # Last 2000 chars
     finally:
+        # Signal threads to stop
+        stop_event.set()
+        output_queue.put(None)  # Signal writer to finish
+
         # Cleanup
+        reader.join(timeout=2)
+        writer.join(timeout=2)
         decoder.terminate()
-        encoder.stdin.close()
+        try:
+            encoder.stdin.close()
+        except:
+            pass
         encoder.wait()
 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+
+        if reader_error[0]:
+            print(f"\nReader error: {reader_error[0]}")
+        if writer_error[0]:
+            print(f"\nWriter error: {writer_error[0]}")
+            # Show encoder stderr if writer failed
+            try:
+                err = encoder.stderr.read().decode('utf-8', errors='ignore')
+                if err:
+                    print(f"Encoder error:\n{err[-1500:]}")
+            except:
+                pass
 
     # Check if encoder succeeded
     if encoder.returncode != 0:
@@ -374,7 +430,7 @@ NOTE: This mode is FASTER but has NO RESUME capability.
 
     parser.add_argument("-i", "--input", required=True, help="Input video file")
     parser.add_argument("-o", "--output", default=None, help="Output video file (default: output/<name>_<width>x<height>.mp4)")
-    parser.add_argument("-m", "--model", default="realesr-animevideov3",
+    parser.add_argument("-m", "--model", default="RealESRGAN_x4plus",
                         choices=["RealESRGAN_x4plus", "RealESRGAN_x4plus_anime_6B", "realesr-animevideov3"],
                         help="Model to use (default: realesr-animevideov3 - fastest)")
     parser.add_argument("-t", "--tile", type=int, default=0,
