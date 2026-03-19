@@ -24,10 +24,25 @@ import cv2
 import os
 import subprocess
 import shutil
+import sys
 import numpy as np
 from pathlib import Path
+import io
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
+
+
+class SuppressOutput:
+    """Context manager to suppress stdout/stderr (for silencing Real-ESRGAN tile output)."""
+    def __enter__(self):
+        self._stdout = sys.stdout
+        self._stderr = sys.stderr
+        sys.stdout = io.StringIO()
+        sys.stderr = io.StringIO()
+        return self
+    def __exit__(self, *args):
+        sys.stdout = self._stdout
+        sys.stderr = self._stderr
 
 
 def get_optimal_tile_size():
@@ -315,9 +330,10 @@ def upscale_video_pipe(input_path, output_path, model_name, tile_size=0, scale=4
                 if frame is None:  # End of input
                     break
 
-                # Upscale on GPU
+                # Upscale on GPU (suppress tile output)
                 try:
-                    output_frame, _ = upsampler.enhance(frame, outscale=scale)
+                    with SuppressOutput():
+                        output_frame, _ = upsampler.enhance(frame, outscale=scale)
 
                     # Crop to exact output size if needed
                     if output_frame.shape[1] != out_width or output_frame.shape[0] != out_height:
