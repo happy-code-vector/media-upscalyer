@@ -119,8 +119,10 @@ def get_ffmpeg_path():
 
     print("ERROR: ffmpeg not found.")
     print("\nInstall ffmpeg:")
-    print("  pip install imageio-ffmpeg")
-    print("  Or download from: https://www.gyan.dev/ffmpeg/builds/")
+    print("  Ubuntu: apt update && apt install -y ffmpeg")
+    print("  pip: pip install imageio-ffmpeg")
+    print("  Windows: https://www.gyan.dev/ffmpeg/builds/")
+    print("\nNOTE: For NVENC hardware encoding, install system ffmpeg (apt install ffmpeg)")
     sys.exit(1)
 
 
@@ -135,8 +137,9 @@ def extract_frames(video_path: str, frames_dir: str):
 
     os.makedirs(frames_dir, exist_ok=True)
     print(f"Extracting frames from {video_path}...")
+    # Note: -vsync is deprecated in FFmpeg 7.0+, using -fps_mode instead
     cmd = [FFMPEG_PATH, "-y", "-i", video_path, "-qscale:v", "1", "-qmin", "1", "-qmax", "1",
-           "-vsync", "0", os.path.join(frames_dir, "frame_%08d.png")]
+           "-fps_mode", "passthrough", os.path.join(frames_dir, "frame_%08d.png")]
     subprocess.run(cmd, check=True, capture_output=True)
     print(f"Frames extracted to {frames_dir}")
 
