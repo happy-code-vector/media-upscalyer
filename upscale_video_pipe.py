@@ -220,6 +220,7 @@ def upscale_video_pipe(input_path, output_path, model_name, tile_size=0, scale=4
 
     if has_nvenc:
         print("Encoding: NVENC (GPU)")
+        # Use compatible parameters for older ffmpeg (4.x) and newer (5.x+)
         encode_cmd = [
             FFMPEG_PATH, "-y",
             "-f", "rawvideo",
@@ -228,10 +229,11 @@ def upscale_video_pipe(input_path, output_path, model_name, tile_size=0, scale=4
             "-r", str(fps),
             "-i", "-",
             "-c:v", "h264_nvenc",
-            "-preset", "p4",
-            "-rc:v", "vbr_hq",
-            "-cq:v", "20",
-            "-b:v", "0",
+            "-preset", "hq",
+            "-rc", "vbr",
+            "-cq", "20",
+            "-b:v", "10M",
+            "-maxrate", "20M",
             "-pix_fmt", "yuv420p",
             output_path
         ]
