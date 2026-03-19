@@ -7,6 +7,12 @@ Based on: https://github.com/yuvraj108c/4k-video-upscaler-colab
 Original Real-ESRGAN: https://github.com/xinntao/Real-ESRGAN
 """
 
+# Fix for torchvision 0.17+ compatibility with basicsr
+# basicsr tries to import from functional_tensor which was renamed
+import torchvision.transforms
+import torchvision.transforms.functional
+torchvision.transforms.functional_tensor = torchvision.transforms.functional
+
 import argparse
 import cv2
 import os
