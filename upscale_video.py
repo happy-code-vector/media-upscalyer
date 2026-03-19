@@ -200,13 +200,21 @@ def upscale_frames(frames_dir: str, output_dir: str, model: str, scale_factor: f
 
     frame_files = sorted([f for f in os.listdir(frames_dir) if f.endswith(('.png', '.jpg', '.jpeg'))])
     os.makedirs(output_dir, exist_ok=True)
-    print(f"Upscaling {len(frame_files)} frames with scale factor {scale_factor}...")
+
+    # Skip already processed frames (for resume capability)
+    existing_files = set(os.listdir(output_dir)) if os.path.exists(output_dir) else set()
+    frames_to_process = [f for f in frame_files if f not in existing_files]
+
+    if len(existing_files) > 0:
+        print(f"Found {len(existing_files)} already processed frames, {len(frames_to_process)} remaining")
+
+    print(f"Upscaling {len(frames_to_process)} frames with scale factor {scale_factor}...")
     print(f"Using model: {model} | Half precision: {use_half} | Batch size: {batch_size}")
 
     if batch_size > 1:
         # Batch processing for better GPU utilization
-        for i in tqdm(range(0, len(frame_files), batch_size), desc="Upscaling batches"):
-            batch_files = frame_files[i:i + batch_size]
+        for i in tqdm(range(0, len(frames_to_process), batch_size), desc="Upscaling batches"):
+            batch_files = frames_to_process[i:i + batch_size]
             batch_imgs = []
             for f in batch_files:
                 img = cv2.imread(os.path.join(frames_dir, f), cv2.IMREAD_UNCHANGED)
@@ -214,14 +222,25 @@ def upscale_frames(frames_dir: str, output_dir: str, model: str, scale_factor: f
 
             # Process batch
             for f, img in zip(batch_files, batch_imgs):
-                output, _ = upsampler.enhance(img, outscale=scale_factor)
-                cv2.imwrite(os.path.join(output_dir, f), output)
+                try:
+                    output, _ = upsampler.enhance(img, outscale=scale_factor)
+                    cv2.imwrite(os.path.join(output_dir, f), output)
+                except Exception as e:
+                    print(f"\nError processing {f}: {e}")
+                    continue
     else:
         # Single frame processing
-        for frame_file in tqdm(frame_files, desc="Upscaling"):
-            img = cv2.imread(os.path.join(frames_dir, frame_file), cv2.IMREAD_UNCHANGED)
-            output, _ = upsampler.enhance(img, outscale=scale_factor)
-            cv2.imwrite(os.path.join(output_dir, frame_file), output)
+        for frame_file in tqdm(frames_to_process, desc="Upscaling"):
+            # Skip if already exists
+            if frame_file in existing_files:
+                continue
+            try:
+                img = cv2.imread(os.path.join(frames_dir, frame_file), cv2.IMREAD_UNCHANGED)
+                output, _ = upsampler.enhance(img, outscale=scale_factor)
+                cv2.imwrite(os.path.join(output_dir, frame_file), output)
+            except Exception as e:
+                print(f"\nError processing {frame_file}: {e}")
+                continue
 
     # Clear GPU memory
     if torch.cuda.is_available():
