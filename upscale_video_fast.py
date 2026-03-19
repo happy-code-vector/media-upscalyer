@@ -45,6 +45,12 @@ def load_fast_model(model_name="realesr-animevideov3"):
             "scale": 4,
             "url": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-animevideov3.pth"
         },
+        "RealESRGAN_x4plus": {
+            "class": RRDBNet,
+            "args": {"num_in_ch": 3, "num_out_ch": 3, "num_feat": 64, "num_block": 23, "num_grow_ch": 32, "scale": 4},
+            "scale": 4,
+            "url": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth"
+        },
         "RealESRGAN_x4plus_anime_6B": {
             "class": RRDBNet,
             "args": {"num_in_ch": 3, "num_out_ch": 3, "num_feat": 64, "num_block": 6, "num_grow_ch": 32, "scale": 4},
@@ -64,7 +70,17 @@ def load_fast_model(model_name="realesr-animevideov3"):
         load_file_from_url(url=config["url"], model_dir=str(model_dir), file_name=f"{model_name}.pth")
 
     model = config["class"](**config["args"])
-    model.load_state_dict(torch.load(model_path, map_location='cuda', weights_only=True), strict=True)
+
+    # Load weights - handle different formats
+    checkpoint = torch.load(model_path, map_location='cuda', weights_only=False)
+    if 'params_ema' in checkpoint:
+        state_dict = checkpoint['params_ema']
+    elif 'params' in checkpoint:
+        state_dict = checkpoint['params']
+    else:
+        state_dict = checkpoint
+
+    model.load_state_dict(state_dict, strict=True)
     model = model.cuda().half().eval()
 
     return model, config["scale"]
