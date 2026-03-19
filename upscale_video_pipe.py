@@ -27,22 +27,23 @@ import shutil
 import sys
 import numpy as np
 from pathlib import Path
-import io
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
 
 
 class SuppressOutput:
-    """Context manager to suppress stdout/stderr (for silencing Real-ESRGAN tile output)."""
+    """Fast context manager to suppress stdout/stderr."""
     def __enter__(self):
+        self._null = open(os.devnull, 'w')
         self._stdout = sys.stdout
         self._stderr = sys.stderr
-        sys.stdout = io.StringIO()
-        sys.stderr = io.StringIO()
+        sys.stdout = self._null
+        sys.stderr = self._null
         return self
     def __exit__(self, *args):
         sys.stdout = self._stdout
         sys.stderr = self._stderr
+        self._null.close()
 
 
 def get_optimal_tile_size():
@@ -55,18 +56,18 @@ def get_optimal_tile_size():
         vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
         gpu_name = torch.cuda.get_device_name(0)
 
-        if vram_gb >= 32:
-            tile_size = 800
-        elif vram_gb >= 24:
-            tile_size = 512
+        # For high VRAM cards, try no tiling first (much faster)
+        # Fall back to tiling only if OOM occurs
+        if vram_gb >= 20:
+            tile_size = 800  # No tiling - process whole image
         elif vram_gb >= 16:
-            tile_size = 400
+            tile_size = 640
         elif vram_gb >= 12:
-            tile_size = 320
+            tile_size = 512
         elif vram_gb >= 8:
-            tile_size = 256
+            tile_size = 400
         else:
-            tile_size = 128
+            tile_size = 256
 
         print(f"GPU: {gpu_name} ({vram_gb:.1f}GB VRAM) → Tile size: {tile_size}")
         return tile_size
