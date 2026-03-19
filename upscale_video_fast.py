@@ -230,7 +230,7 @@ def main():
     parser.add_argument("-i", "--input", required=True)
     parser.add_argument("-o", "--output", default=None)
     parser.add_argument("-m", "--model", default="realesr-animevideov3",
-                        choices=["realesr-animevideov3", "RealESRGAN_x4plus_anime_6B"])
+                        choices=["realesr-animevideov3", "RealESRGAN_x4plus_anime_6B", "RealESRGAN_x4plus"])
     parser.add_argument("-s", "--scale", type=int, default=2, choices=[2, 3, 4])
     parser.add_argument("--no-nvenc", action="store_true")
 
