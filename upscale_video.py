@@ -8,10 +8,16 @@ Original Real-ESRGAN: https://github.com/xinntao/Real-ESRGAN
 """
 
 # Fix for torchvision 0.17+ compatibility with basicsr
-# basicsr tries to import from functional_tensor which was renamed
-import torchvision.transforms
-import torchvision.transforms.functional
-torchvision.transforms.functional_tensor = torchvision.transforms.functional
+# basicsr tries to import from functional_tensor which was renamed/removed
+import sys
+import types
+
+# Create a compatibility module for the old import path
+import torchvision.transforms.functional as F
+
+_compat_module = types.ModuleType('torchvision.transforms.functional_tensor')
+_compat_module.rgb_to_grayscale = F.rgb_to_grayscale
+sys.modules['torchvision.transforms.functional_tensor'] = _compat_module
 
 import argparse
 import cv2
