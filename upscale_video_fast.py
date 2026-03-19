@@ -32,6 +32,24 @@ from tqdm import tqdm
 SCRIPT_DIR = Path(__file__).parent.resolve()
 
 
+def get_ffmpeg_path():
+    """Get ffmpeg executable path."""
+    ffmpeg_path = shutil.which("ffmpeg")
+    if ffmpeg_path:
+        return ffmpeg_path
+
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except ImportError:
+        pass
+
+    print("ERROR: ffmpeg not found.")
+    print("  Install with: pip install imageio-ffmpeg")
+    print("  Or add ffmpeg to PATH")
+    sys.exit(1)
+
+
 def load_fast_model(model_name="realesr-animevideov3"):
     """Load model and return model directly (not wrapped in RealESRGANer)."""
     from basicsr.archs.rrdbnet_arch import RRDBNet
@@ -149,7 +167,7 @@ def upscale_video_fast(input_path, output_path, model_name="realesr-animevideov3
     print(f"GPU: {torch.cuda.get_device_name(0)}")
 
     # FFmpeg decoder
-    ffmpeg_path = shutil.which("ffmpeg")
+    ffmpeg_path = get_ffmpeg_path()
     decode_cmd = [
         ffmpeg_path, "-i", input_path,
         "-f", "image2pipe", "-pix_fmt", "bgr24",
@@ -226,7 +244,7 @@ def upscale_video_fast(input_path, output_path, model_name="realesr-animevideov3
 
 
 def add_audio(original, video):
-    ffmpeg = shutil.which("ffmpeg")
+    ffmpeg = get_ffmpeg_path()
     temp = video.replace(".mp4", "_temp.mp4")
 
     cmd = [ffmpeg, "-y", "-i", video, "-i", original,
