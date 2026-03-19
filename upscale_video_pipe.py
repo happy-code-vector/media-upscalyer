@@ -91,6 +91,20 @@ def get_ffmpeg_path():
     sys.exit(1)
 
 
+def check_nvenc_support():
+    """Check if FFmpeg actually supports NVENC (not just if GPU exists)."""
+    FFMPEG_PATH = get_ffmpeg_path()
+    try:
+        # Test if ffmpeg has h264_nvenc encoder
+        result = subprocess.run(
+            [FFMPEG_PATH, "-encoders"],
+            capture_output=True, text=True
+        )
+        return "h264_nvenc" in result.stdout
+    except Exception:
+        return False
+
+
 def get_video_info(video_path):
     """Get video metadata."""
     cap = cv2.VideoCapture(video_path)
@@ -201,8 +215,11 @@ def upscale_video_pipe(input_path, output_path, model_name, tile_size=0, scale=4
     decoder = subprocess.Popen(decode_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=10**8)
 
     # Start FFmpeg encoder (output)
-    # Try NVENC first, fallback to libx264
-    if use_nvenc and shutil.which("nvidia-smi"):
+    # Check if FFmpeg actually supports NVENC
+    has_nvenc = check_nvenc_support() if use_nvenc else False
+
+    if has_nvenc:
+        print("Encoding: NVENC (GPU)")
         encode_cmd = [
             FFMPEG_PATH, "-y",
             "-f", "rawvideo",
@@ -218,9 +235,10 @@ def upscale_video_pipe(input_path, output_path, model_name, tile_size=0, scale=4
             "-pix_fmt", "yuv420p",
             output_path
         ]
-        encoder = subprocess.Popen(encode_cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
-        using_nvenc = True
     else:
+        print("Encoding: libx264 (CPU)")
+        if use_nvenc:
+            print("NOTE: NVENC not available. Install system ffmpeg: apt install ffmpeg")
         encode_cmd = [
             FFMPEG_PATH, "-y",
             "-f", "rawvideo",
@@ -234,10 +252,9 @@ def upscale_video_pipe(input_path, output_path, model_name, tile_size=0, scale=4
             "-pix_fmt", "yuv420p",
             output_path
         ]
-        encoder = subprocess.Popen(encode_cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
-        using_nvenc = False
 
-    print(f"Encoding: {'NVENC (GPU)' if using_nvenc else 'libx264 (CPU)'}")
+    encoder = subprocess.Popen(encode_cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+
     print(f"\nProcessing {frame_count} frames...")
 
     # Processing loop
@@ -277,6 +294,12 @@ def upscale_video_pipe(input_path, output_path, model_name, tile_size=0, scale=4
 
     except KeyboardInterrupt:
         print("\n\nInterrupted! Partial video saved.")
+    except BrokenPipeError:
+        print("\n\nERROR: Encoder crashed!")
+        # Get encoder error output
+        encoder_stderr = encoder.stderr.read().decode('utf-8', errors='ignore')
+        if encoder_stderr:
+            print(f"Encoder error:\n{encoder_stderr[-2000:]}")  # Last 2000 chars
     finally:
         # Cleanup
         decoder.terminate()
@@ -285,6 +308,10 @@ def upscale_video_pipe(input_path, output_path, model_name, tile_size=0, scale=4
 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+
+    # Check if encoder succeeded
+    if encoder.returncode != 0:
+        print(f"\nWARNING: Encoder exited with code {encoder.returncode}")
 
     print(f"\n{'='*50}")
     print(f"DONE! Processed {processed} frames")
