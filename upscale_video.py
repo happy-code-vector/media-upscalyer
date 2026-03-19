@@ -155,6 +155,48 @@ def get_video_info(video_path: str):
     return width, height, fps, frame_count
 
 
+def get_optimal_tile_size(use_cpu: bool = False):
+    """
+    Auto-detect optimal tile size based on available VRAM.
+
+    VRAM Guidelines for Real-ESRGAN:
+    - 32GB+ (RTX 5090): 800-1024
+    - 24GB (RTX 3090/4090): 512-640
+    - 16GB (RTX 4080): 400-512
+    - 12GB (RTX 3080/4070): 320-400
+    - 8GB (RTX 3070/4060): 200-320
+    - CPU: 0 (no tiling needed, process whole image)
+    """
+    if use_cpu:
+        return 0
+
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            return 0
+
+        vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+        gpu_name = torch.cuda.get_device_name(0)
+
+        if vram_gb >= 32:
+            tile_size = 800
+        elif vram_gb >= 24:
+            tile_size = 512
+        elif vram_gb >= 16:
+            tile_size = 400
+        elif vram_gb >= 12:
+            tile_size = 320
+        elif vram_gb >= 8:
+            tile_size = 256
+        else:
+            tile_size = 128
+
+        print(f"GPU: {gpu_name} ({vram_gb:.1f}GB VRAM) → Auto tile size: {tile_size}")
+        return tile_size
+    except Exception:
+        return 0
+
+
 def upscale_frames(frames_dir: str, output_dir: str, model: str, scale_factor: float, tile_size: int = 0, use_cpu: bool = False, batch_size: int = 1):
     """Upscale frames using Real-ESRGAN."""
     import torch
@@ -194,6 +236,10 @@ def upscale_frames(frames_dir: str, output_dir: str, model: str, scale_factor: f
     if not model_path.exists():
         print(f"Downloading model {model}...")
         model_path = load_file_from_url(url=config["url"], model_dir=str(model_dir), progress=True, file_name=f"{model}.pth")
+
+    # Auto-detect optimal tile size if not specified
+    if tile_size == 0:
+        tile_size = get_optimal_tile_size(use_cpu)
 
     model_instance = config["model_class"](**config["model_args"])
     # Use FP16 half precision only when GPU is available
