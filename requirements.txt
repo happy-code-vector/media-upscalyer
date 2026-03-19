@@ -3,7 +3,9 @@
 
 # ============================================
 # STEP 1: Install PyTorch with CUDA support first
-# pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+#
+# Use these compatible versions:
+# pip install torch==2.2.0 torchvision==0.17.0 --index-url https://download.pytorch.org/whl/cu121
 # ============================================
 
 # Core dependencies
@@ -37,7 +39,7 @@ pyyaml>=6.0
 #    source venv/bin/activate
 #
 # 2. Install PyTorch with CUDA 12.1:
-#    pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+#    pip install torch==2.2.0 torchvision==0.17.0 --index-url https://download.pytorch.org/whl/cu121
 #
 # 3. Install other dependencies:
 #    pip install -r requirements.txt
@@ -46,7 +48,16 @@ pyyaml>=6.0
 #    python upscale_video.py -i input.mp4 -m realesr-animevideov3
 #
 # ============================================
+# TROUBLESHOOTING:
+# ============================================
+# If you get "No module named 'torchvision.transforms.functional_tensor'" error:
+#   pip install --upgrade basicsr
+#
+# If torch/torchvision version mismatch:
+#   pip install torch==2.2.0 torchvision==0.17.0 --index-url https://download.pytorch.org/whl/cu121
+#
+# ============================================
 # FOR CPU ONLY (slower):
-# pip install torch torchvision
+# pip install torch==2.2.0 torchvision==0.17.0
 # python upscale_video.py -i input.mp4 --cpu
 # ============================================
