@@ -344,7 +344,7 @@ NOTE: This mode is FASTER but has NO RESUME capability.
     )
 
     parser.add_argument("-i", "--input", required=True, help="Input video file")
-    parser.add_argument("-o", "--output", required=True, help="Output video file")
+    parser.add_argument("-o", "--output", default=None, help="Output video file (default: output/<name>_<width>x<height>.mp4)")
     parser.add_argument("-m", "--model", default="realesr-animevideov3",
                         choices=["RealESRGAN_x4plus", "RealESRGAN_x4plus_anime_6B", "realesr-animevideov3"],
                         help="Model to use (default: realesr-animevideov3 - fastest)")
@@ -359,6 +359,15 @@ NOTE: This mode is FASTER but has NO RESUME capability.
     if not os.path.exists(args.input):
         print(f"ERROR: Input file not found: {args.input}")
         sys.exit(1)
+
+    # Generate default output path if not specified
+    if args.output is None:
+        input_name = Path(args.input).stem
+        width, height, _, _ = get_video_info(args.input)
+        out_width = width * args.scale
+        out_height = height * args.scale
+        os.makedirs("output", exist_ok=True)
+        args.output = f"output/{input_name}_{out_width}x{out_height}.mp4"
 
     check_gpu()
 
