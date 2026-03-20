@@ -268,6 +268,9 @@ def upscale_video_fast(input_path, output_path, model_name="realesr-animevideov3
     except KeyboardInterrupt:
         print("\n\nInterrupted!")
     finally:
+        # Wait for output queue to empty (all frames written to encoder)
+        output_queue.join()
+
         # Signal threads to stop
         stop_event.set()
         output_queue.put(None)  # Signal writer to finish
