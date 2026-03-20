@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
 Optimized Video Upsscaler - Direct Tensor Pipeline
-Eliminates numpy conversion overhead for 10x+ speedup
+Reliable sequential I/O with GPU encoding
 
-BENCHMARK RESULTS (RTX 4090):
+BENCHMARK:
   RealESRGANer.enhance(): 730ms/frame (1.4 fps)
   Direct tensor call: 60ms/frame (16.8 fps)
 """
@@ -147,7 +147,7 @@ def upscale_frame_direct(model, frame_bgr, scale=2, model_scale=4):
 
 
 def upscale_video_fast(input_path, output_path, model_name="realesr-animevideov3", scale=2, use_nvenc=True):
-    """Upscale video using direct tensor pipeline."""
+    """Upscale video using direct tensor pipeline with reliable sequential I/O."""
 
     # Load model
     print(f"Loading model: {model_name}")
@@ -163,6 +163,7 @@ def upscale_video_fast(input_path, output_path, model_name="realesr-animevideov3
 
     out_width = width * scale
     out_height = height * scale
+    frame_size = width * height * 3
 
     print(f"Input: {width}x{height} @ {fps:.2f} fps, {frame_count} frames")
     print(f"Output: {out_width}x{out_height} ({scale}x upscale)")
@@ -177,16 +178,16 @@ def upscale_video_fast(input_path, output_path, model_name="realesr-animevideov3
     ]
     decoder = subprocess.Popen(decode_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=10**8)
 
-    # FFmpeg encoder
+    # FFmpeg encoder - use faster preset for reliability
     if use_nvenc:
         encode_cmd = [
             ffmpeg_path, "-y", "-f", "rawvideo", "-pix_fmt", "bgr24",
             "-s", f"{out_width}x{out_height}", "-r", str(fps),
-            "-i", "-", "-c:v", "h264_nvenc", "-preset", "hq",
-            "-rc", "vbr", "-cq", "20", "-b:v", "10M", "-pix_fmt", "yuv420p",
+            "-i", "-", "-c:v", "h264_nvenc", "-preset", "p4",  # Faster preset
+            "-rc", "vbr", "-cq", "23", "-b:v", "8M", "-pix_fmt", "yuv420p",
             output_path
         ]
-        print("Encoding: NVENC (GPU)")
+        print("Encoding: NVENC (GPU) - fast preset")
     else:
         encode_cmd = [
             ffmpeg_path, "-y", "-f", "rawvideo", "-pix_fmt", "bgr24",
@@ -198,18 +199,14 @@ def upscale_video_fast(input_path, output_path, model_name="realesr-animevideov3
 
     encoder = subprocess.Popen(encode_cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
 
-    # Threading for overlapping I/O with GPU processing
-    input_queue = queue.Queue(maxsize=8)   # Pre-buffer 8 input frames
-    output_queue = queue.Queue(maxsize=8)  # Pre-buffer 8 output frames
-    frame_size = width * height * 3
-    stop_event = threading.Event()
+    # Pre-buffer input frames using a thread (only reader thread, no writer thread)
+    input_queue = queue.Queue(maxsize=16)  # Buffer 16 frames
     reader_error = [None]
-    writer_error = [None]
 
     def reader_thread():
         """Read frames from decoder and put in queue."""
         try:
-            while not stop_event.is_set():
+            while True:
                 raw_frame = decoder.stdout.read(frame_size)
                 if len(raw_frame) != frame_size:
                     input_queue.put(None)  # Signal end
@@ -220,31 +217,16 @@ def upscale_video_fast(input_path, output_path, model_name="realesr-animevideov3
             reader_error[0] = e
             input_queue.put(None)
 
-    def writer_thread():
-        """Write frames from queue to encoder."""
-        try:
-            while True:
-                item = output_queue.get()
-                if item is None:  # Signal end
-                    break
-                encoder.stdin.write(item)
-                output_queue.task_done()
-        except BrokenPipeError:
-            pass  # Encoder closed
-        except Exception as e:
-            writer_error[0] = e
-
-    # Start threads
+    # Start reader thread
     reader = threading.Thread(target=reader_thread, daemon=True)
-    writer = threading.Thread(target=writer_thread, daemon=True)
     reader.start()
-    writer.start()
 
-    # Main processing loop
+    # Main processing loop - write directly to encoder (sequential, reliable)
     processed = 0
+    encoder_died = False
 
     print(f"\nProcessing {frame_count} frames...")
-    print("Using threaded I/O for overlapping decode/GPU/encode")
+    print("Mode: Reliable sequential I/O (decode || GPU+encode)")
     start_time = time.time()
 
     try:
@@ -254,13 +236,31 @@ def upscale_video_fast(input_path, output_path, model_name="realesr-animevideov3
                 if frame is None:  # End of input
                     break
 
+                # Check if encoder is still alive
+                if encoder.poll() is not None:
+                    print(f"\nEncoder died unexpectedly (exit code: {encoder.returncode})")
+                    encoder_died = True
+                    break
+
                 try:
+                    # Upscale
                     output_frame = upscale_frame_direct(model, frame, scale, model_scale)
-                    output_queue.put(output_frame.tobytes())
+
+                    # Write directly to encoder (may block if encoder is slow - this is OK)
+                    encoder.stdin.write(output_frame.tobytes())
+
+                except BrokenPipeError:
+                    print(f"\nEncoder pipe broken at frame {processed}")
+                    encoder_died = True
+                    break
                 except Exception as e:
                     print(f"\nError on frame {processed}: {e}")
+                    # Write black frame to keep sync
                     black = np.zeros((out_height, out_width, 3), dtype=np.uint8)
-                    output_queue.put(black.tobytes())
+                    try:
+                        encoder.stdin.write(black.tobytes())
+                    except:
+                        pass
 
                 processed += 1
                 pbar.update(1)
@@ -268,33 +268,29 @@ def upscale_video_fast(input_path, output_path, model_name="realesr-animevideov3
     except KeyboardInterrupt:
         print("\n\nInterrupted!")
     finally:
-        # Wait for output queue to empty (all frames written to encoder)
-        output_queue.join()
-
-        # Signal threads to stop
-        stop_event.set()
-        output_queue.put(None)  # Signal writer to finish
-
         # Cleanup
         reader.join(timeout=2)
-        writer.join(timeout=2)
         decoder.terminate()
+
         try:
             encoder.stdin.close()
         except:
             pass
-        encoder.wait()
+        encoder.wait(timeout=30)
 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
         if reader_error[0]:
             print(f"\nReader error: {reader_error[0]}")
-        if writer_error[0]:
-            print(f"\nWriter error: {writer_error[0]}")
+
+    if encoder_died:
+        # Get encoder error output
+        stderr = encoder.stderr.read().decode('utf-8', errors='ignore')
+        print(f"\nEncoder stderr:\n{stderr[-1000:]}")  # Last 1000 chars
 
     elapsed = time.time() - start_time
-    avg_fps = processed / elapsed
+    avg_fps = processed / elapsed if elapsed > 0 else 0
 
     print(f"\n{'='*50}")
     print(f"DONE! {processed} frames in {elapsed/60:.1f} min")
@@ -302,8 +298,11 @@ def upscale_video_fast(input_path, output_path, model_name="realesr-animevideov3
     print(f"Output: {output_path}")
     print(f"{'='*50}")
 
-    # Add audio
-    add_audio(input_path, output_path)
+    # Add audio only if encoding succeeded
+    if not encoder_died and processed > 0:
+        add_audio(input_path, output_path)
+    else:
+        print("Skipping audio - encoding had errors")
 
 
 def add_audio(original, video):
@@ -329,7 +328,7 @@ def main():
     parser.add_argument("-m", "--model", default="realesr-animevideov3",
                         choices=["realesr-animevideov3", "RealESRGAN_x4plus_anime_6B", "RealESRGAN_x4plus"])
     parser.add_argument("-s", "--scale", type=int, default=2, choices=[2, 3, 4])
-    parser.add_argument("--no-nvenc", action="store_true")
+    parser.add_argument("--no-nvenc", action="store_true", help="Use CPU encoding (libx264)")
 
     args = parser.parse_args()
 
