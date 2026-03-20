@@ -27,6 +27,8 @@ import cv2
 import numpy as np
 import torch
 from tqdm import tqdm
+import threading
+import queue
 
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
@@ -196,29 +198,69 @@ def upscale_video_fast(input_path, output_path, model_name="realesr-animevideov3
 
     encoder = subprocess.Popen(encode_cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
 
-    # Processing loop
+    # Threading for overlapping I/O with GPU processing
+    input_queue = queue.Queue(maxsize=8)   # Pre-buffer 8 input frames
+    output_queue = queue.Queue(maxsize=8)  # Pre-buffer 8 output frames
     frame_size = width * height * 3
+    stop_event = threading.Event()
+    reader_error = [None]
+    writer_error = [None]
+
+    def reader_thread():
+        """Read frames from decoder and put in queue."""
+        try:
+            while not stop_event.is_set():
+                raw_frame = decoder.stdout.read(frame_size)
+                if len(raw_frame) != frame_size:
+                    input_queue.put(None)  # Signal end
+                    break
+                frame = np.frombuffer(raw_frame, dtype=np.uint8).reshape((height, width, 3)).copy()
+                input_queue.put(frame)
+        except Exception as e:
+            reader_error[0] = e
+            input_queue.put(None)
+
+    def writer_thread():
+        """Write frames from queue to encoder."""
+        try:
+            while True:
+                item = output_queue.get()
+                if item is None:  # Signal end
+                    break
+                encoder.stdin.write(item)
+                output_queue.task_done()
+        except BrokenPipeError:
+            pass  # Encoder closed
+        except Exception as e:
+            writer_error[0] = e
+
+    # Start threads
+    reader = threading.Thread(target=reader_thread, daemon=True)
+    writer = threading.Thread(target=writer_thread, daemon=True)
+    reader.start()
+    writer.start()
+
+    # Main processing loop
     processed = 0
 
     print(f"\nProcessing {frame_count} frames...")
+    print("Using threaded I/O for overlapping decode/GPU/encode")
     start_time = time.time()
 
     try:
         with tqdm(total=frame_count, desc="Upscaling", unit="frames") as pbar:
             while True:
-                raw_frame = decoder.stdout.read(frame_size)
-                if len(raw_frame) != frame_size:
+                frame = input_queue.get()
+                if frame is None:  # End of input
                     break
-
-                frame = np.frombuffer(raw_frame, dtype=np.uint8).reshape((height, width, 3))
 
                 try:
                     output_frame = upscale_frame_direct(model, frame, scale, model_scale)
-                    encoder.stdin.write(output_frame.tobytes())
+                    output_queue.put(output_frame.tobytes())
                 except Exception as e:
                     print(f"\nError on frame {processed}: {e}")
                     black = np.zeros((out_height, out_width, 3), dtype=np.uint8)
-                    encoder.stdin.write(black.tobytes())
+                    output_queue.put(black.tobytes())
 
                 processed += 1
                 pbar.update(1)
@@ -226,9 +268,27 @@ def upscale_video_fast(input_path, output_path, model_name="realesr-animevideov3
     except KeyboardInterrupt:
         print("\n\nInterrupted!")
     finally:
+        # Signal threads to stop
+        stop_event.set()
+        output_queue.put(None)  # Signal writer to finish
+
+        # Cleanup
+        reader.join(timeout=2)
+        writer.join(timeout=2)
         decoder.terminate()
-        encoder.stdin.close()
+        try:
+            encoder.stdin.close()
+        except:
+            pass
         encoder.wait()
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        if reader_error[0]:
+            print(f"\nReader error: {reader_error[0]}")
+        if writer_error[0]:
+            print(f"\nWriter error: {writer_error[0]}")
 
     elapsed = time.time() - start_time
     avg_fps = processed / elapsed
