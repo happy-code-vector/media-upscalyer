@@ -134,6 +134,14 @@ def upscale_frame_direct(model, frame_bgr, scale=2, model_scale=4):
         # Upscale
         output = model(tensor)
 
+        # Downscale on GPU when target scale < model scale: avoids the 33MP
+        # device->host copy and CPU Lanczos pass (~2x faster end-to-end)
+        if scale != model_scale:
+            h, w = frame_bgr.shape[:2]
+            output = torch.nn.functional.interpolate(
+                output, size=(h * scale, w * scale),
+                mode="bicubic", align_corners=False)
+
         # Remove batch dim, CHW -> HWC, denormalize
         output = output.squeeze(0).float()
         output = (output * 255).clamp(0, 255).byte()
@@ -141,12 +149,6 @@ def upscale_frame_direct(model, frame_bgr, scale=2, model_scale=4):
 
         # RGB -> BGR
         output_bgr = cv2.cvtColor(output_np, cv2.COLOR_RGB2BGR)
-
-        # Resize to target scale if different from model scale
-        if scale != model_scale:
-            h, w = frame_bgr.shape[:2]
-            target_h, target_w = h * scale, w * scale
-            output_bgr = cv2.resize(output_bgr, (target_w, target_h), interpolation=cv2.INTER_LANCZOS4)
 
         return output_bgr
 
