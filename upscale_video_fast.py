@@ -111,7 +111,34 @@ def load_fast_model(model_name="realesr-animevideov3"):
     return model, config["scale"]
 
 
-def upscale_frame_direct(model, frame_bgr, scale=2, model_scale=4):
+def _upscale_tiled(model, tensor, model_scale, tile=960, overlap=16):
+    """Run the model tile-by-tile with overlap, stitching on the GPU.
+
+    Bounds peak VRAM for RRDBNet models whose dense feature maps cost
+    ~8.3 KB per input pixel (1080p direct needs ~17 GiB on a 12 GB card).
+    """
+    _, _, h, w = tensor.shape
+    out = torch.empty((1, 3, h * model_scale, w * model_scale),
+                      dtype=tensor.dtype, device=tensor.device)
+    for y0 in range(0, h, tile):
+        for x0 in range(0, w, tile):
+            y1, x1 = min(y0 + tile, h), min(x0 + tile, w)
+            # grow the input region into neighbours (clamped) so border
+            # convolutions see true context
+            ye0, xe0 = max(0, y0 - overlap), max(0, x0 - overlap)
+            ye1, xe1 = min(h, y1 + overlap), min(w, x1 + overlap)
+            t = model(tensor[:, :, ye0:ye1, xe0:xe1])
+            # crop the grown margin off the output, scaled to model resolution
+            cy0 = (y0 - ye0) * model_scale
+            cx0 = (x0 - xe0) * model_scale
+            out[:, :, y0 * model_scale:y1 * model_scale,
+                x0 * model_scale:x1 * model_scale] = t[
+                :, :, cy0:cy0 + (y1 - y0) * model_scale,
+                cx0:cx0 + (x1 - x0) * model_scale]
+    return out
+
+
+def upscale_frame_direct(model, frame_bgr, scale=2, model_scale=4, tile=0):
     """
     Upscale frame using direct tensor operations.
     Avoids RealESRGANer overhead.
@@ -131,8 +158,11 @@ def upscale_frame_direct(model, frame_bgr, scale=2, model_scale=4):
         tensor = torch.from_numpy(frame_chw).float().cuda().half()
         tensor = tensor.unsqueeze(0)  # Add batch dim
 
-        # Upscale
-        output = model(tensor)
+        # Upscale (tiled when requested: bounds VRAM for RRDBNet models)
+        if tile and (tensor.shape[2] > tile or tensor.shape[3] > tile):
+            output = _upscale_tiled(model, tensor, model_scale, tile=tile)
+        else:
+            output = model(tensor)
 
         # Downscale on GPU when target scale differs from model scale: avoids the 33MP
         # device->host copy and CPU Lanczos pass (~2x faster end-to-end)
@@ -153,12 +183,18 @@ def upscale_frame_direct(model, frame_bgr, scale=2, model_scale=4):
         return output_bgr
 
 
-def upscale_video_fast(input_path, output_path, model_name="realesr-animevideov3", scale=2, use_nvenc=True):
+def upscale_video_fast(input_path, output_path, model_name="realesr-animevideov3", scale=2, use_nvenc=True, tile=None):
     """Upscale video using direct tensor pipeline with reliable sequential I/O."""
 
     # Load model
     print(f"Loading model: {model_name}")
     model, model_scale = load_fast_model(model_name)
+
+    # RRDBNet models need ~8.3KB/input-pixel VRAM: 1080p direct spills to
+    # system memory (WDDM) and runs ~6x slower. Tile them by default.
+    if tile is None:
+        tile = 960 if model_name in ("RealESRGAN_x4plus", "RealESRGAN_x4plus_anime_6B") else 0
+    print(f"Tiling: {tile}px" if tile else "Tiling: off")
 
     # Get video info
     cap = cv2.VideoCapture(input_path)
@@ -252,7 +288,7 @@ def upscale_video_fast(input_path, output_path, model_name="realesr-animevideov3
 
                 try:
                     # Upscale
-                    output_frame = upscale_frame_direct(model, frame, scale, model_scale)
+                    output_frame = upscale_frame_direct(model, frame, scale, model_scale, tile=tile)
 
                     # Write directly to encoder (may block if encoder is slow - this is OK)
                     encoder.stdin.write(output_frame.tobytes())
@@ -353,6 +389,8 @@ def main():
                         choices=["realesr-animevideov3", "RealESRGAN_x4plus_anime_6B", "RealESRGAN_x4plus"])
     parser.add_argument("-s", "--scale", type=int, default=2, choices=[2, 3, 4])
     parser.add_argument("--no-nvenc", action="store_true", help="Use CPU encoding (libx264)")
+    parser.add_argument("--tile", type=int, default=None,
+                        help="Tile size for RRDB models (0=off, default: auto 960)")
 
     args = parser.parse_args()
 
@@ -371,7 +409,8 @@ def main():
         output_path=args.output,
         model_name=args.model,
         scale=args.scale,
-        use_nvenc=not args.no_nvenc
+        use_nvenc=not args.no_nvenc,
+        tile=args.tile
     )
 
 
