@@ -117,8 +117,10 @@ def _upscale_tiled(model, tensor, model_scale, tile=960, overlap=16):
     Bounds peak VRAM for RRDBNet models whose dense feature maps cost
     ~8.3 KB per input pixel (1080p direct needs ~17 GiB on a 12 GB card).
     """
+    if tile <= 0:
+        raise ValueError(f"tile must be positive, got {tile}")
     _, _, h, w = tensor.shape
-    out = torch.empty((1, 3, h * model_scale, w * model_scale),
+    out = torch.empty((1, tensor.shape[1], h * model_scale, w * model_scale),
                       dtype=tensor.dtype, device=tensor.device)
     for y0 in range(0, h, tile):
         for x0 in range(0, w, tile):
@@ -393,6 +395,9 @@ def main():
                         help="Tile size for RRDB models (0=off, default: auto 960)")
 
     args = parser.parse_args()
+
+    if args.tile is not None and args.tile < 0:
+        parser.error("--tile must be >= 0")
 
     if not os.path.exists(args.input):
         print(f"ERROR: Not found: {args.input}")
