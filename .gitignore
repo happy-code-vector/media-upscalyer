@@ -137,3 +137,7 @@ Thumbs.db
 
 inputs
 results
+
+# Local ffmpeg build and download cache
+ffmpeg/
+.downloads/

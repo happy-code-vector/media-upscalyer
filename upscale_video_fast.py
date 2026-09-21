@@ -36,6 +36,11 @@ SCRIPT_DIR = Path(__file__).parent.resolve()
 
 def get_ffmpeg_path():
     """Get ffmpeg executable path."""
+    # Project-local ffmpeg first (full build with NVENC support)
+    local_ffmpeg = SCRIPT_DIR / "ffmpeg" / "bin" / "ffmpeg.exe"
+    if local_ffmpeg.exists():
+        return str(local_ffmpeg)
+
     ffmpeg_path = shutil.which("ffmpeg")
     if ffmpeg_path:
         return ffmpeg_path
@@ -176,14 +181,14 @@ def upscale_video_fast(input_path, output_path, model_name="realesr-animevideov3
         "-f", "image2pipe", "-pix_fmt", "bgr24",
         "-vcodec", "rawvideo", "-"
     ]
-    decoder = subprocess.Popen(decode_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=10**8)
+    decoder = subprocess.Popen(decode_cmd, stdout=subprocess.PIPE, stderr=open(output_path + ".decoder.log", "w"), bufsize=10**8)
 
     # FFmpeg encoder - use faster preset for reliability
     if use_nvenc:
         encode_cmd = [
             ffmpeg_path, "-y", "-f", "rawvideo", "-pix_fmt", "bgr24",
             "-s", f"{out_width}x{out_height}", "-r", str(fps),
-            "-i", "-", "-c:v", "h264_nvenc", "-preset", "p4",  # Faster preset
+            "-i", "-", "-c:v", "h264_nvenc", "-preset", "fast",  # p1-p7 presets need newer ffmpeg; 4.2 uses fast
             "-rc", "vbr", "-cq", "23", "-b:v", "8M", "-pix_fmt", "yuv420p",
             output_path
         ]
@@ -197,7 +202,8 @@ def upscale_video_fast(input_path, output_path, model_name="realesr-animevideov3
         ]
         print("Encoding: libx264 (CPU)")
 
-    encoder = subprocess.Popen(encode_cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+    # stderr -> file: an undrained PIPE fills its OS buffer and deadlocks the encoder
+    encoder = subprocess.Popen(encode_cmd, stdin=subprocess.PIPE, stderr=open(output_path + ".encoder.log", "w"))
 
     # Pre-buffer input frames using a thread (only reader thread, no writer thread)
     input_queue = queue.Queue(maxsize=16)  # Buffer 16 frames
@@ -276,7 +282,14 @@ def upscale_video_fast(input_path, output_path, model_name="realesr-animevideov3
             encoder.stdin.close()
         except:
             pass
-        encoder.wait(timeout=30)
+
+        # Wait for encoder to finish (can take a while to flush large 4K files)
+        try:
+            encoder.wait(timeout=300)  # 5 minutes timeout
+        except subprocess.TimeoutExpired:
+            print("\nEncoder taking long to finalize, terminating...")
+            encoder.terminate()
+            encoder.wait(timeout=10)
 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -285,24 +298,33 @@ def upscale_video_fast(input_path, output_path, model_name="realesr-animevideov3
             print(f"\nReader error: {reader_error[0]}")
 
     if encoder_died:
-        # Get encoder error output
-        stderr = encoder.stderr.read().decode('utf-8', errors='ignore')
+        # Get encoder error output from its log file
+        try:
+            stderr = open(output_path + ".encoder.log").read()
+        except OSError:
+            stderr = ""
         print(f"\nEncoder stderr:\n{stderr[-1000:]}")  # Last 1000 chars
 
     elapsed = time.time() - start_time
     avg_fps = processed / elapsed if elapsed > 0 else 0
 
+    # Check if output file exists and has content
+    output_exists = os.path.exists(output_path)
+    output_size = os.path.getsize(output_path) if output_exists else 0
+
     print(f"\n{'='*50}")
     print(f"DONE! {processed} frames in {elapsed/60:.1f} min")
     print(f"Average speed: {avg_fps:.1f} fps")
     print(f"Output: {output_path}")
+    if output_exists:
+        print(f"File size: {output_size / (1024*1024):.1f} MB")
     print(f"{'='*50}")
 
-    # Add audio only if encoding succeeded
-    if not encoder_died and processed > 0:
+    # Add audio only if encoding succeeded and file exists
+    if output_exists and output_size > 0 and processed > 0:
         add_audio(input_path, output_path)
     else:
-        print("Skipping audio - encoding had errors")
+        print("Skipping audio - output file missing or empty")
 
 
 def add_audio(original, video):
