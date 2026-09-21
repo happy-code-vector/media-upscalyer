@@ -47,6 +47,14 @@ def main():
     out = upscale_frame_direct(model, frame, scale=2, model_scale=model_scale)
     assert out.shape == (540, 960, 3), f"bad shape {out.shape}"
 
+    # 1b. scale == model_scale: pass-through path, no resize at all
+    out4 = upscale_frame_direct(model, frame, scale=4, model_scale=4)
+    assert out4.shape == (1080, 1920, 3), f"bad 4x shape {out4.shape}"
+
+    # 1c. non-integer ratio 4x -> 3x via explicit size
+    out3 = upscale_frame_direct(model, frame, scale=3, model_scale=4)
+    assert out3.shape == (810, 1440, 3), f"bad 3x shape {out3.shape}"
+
     # 2. must not call cv2.resize (old CPU path did; new path must not)
     orig_resize = cv2.resize
 
